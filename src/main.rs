@@ -77,19 +77,24 @@ async fn main() -> Result<()> {
 
     // Initialize tracing
     let log_level = if args.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(format!(
-            "{}={},zentinel_agent_protocol=info",
+    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        format!(
+            "{}={},zentinel_agent_zentinelsec={},zentinel_agent_protocol=info",
             env!("CARGO_CRATE_NAME"),
+            log_level,
             log_level
-        ))
+        )
+    });
+
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
         .json()
         .init();
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
         protocol = "v2",
-        "Starting Zentinel ZentinelSec Agent (pure Rust ModSecurity)"
+        "Starting ZentinelSec Agent - BUILD 2026-03-25-FIX-01"
     );
 
     // Build configuration

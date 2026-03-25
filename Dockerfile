@@ -8,9 +8,47 @@
 ################################################################################
 # Pre-built binary stage (for CI builds)
 ################################################################################
-FROM gcr.io/distroless/cc-debian12:nonroot AS prebuilt
+# Build arguments
+ARG RUST_VERSION=1.88
+ARG DEBIAN_VARIANT=slim-bookworm
 
-COPY zentinel-zentinelsec-agent /zentinel-zentinelsec-agent
+################################################################################
+# Build stage - compiles the Rust binary with optimizations
+################################################################################
+FROM rust:${RUST_VERSION}-${DEBIAN_VARIANT} AS builder
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        protobuf-compiler \
+        cmake \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 1. Copy only manifests and internal crates to cache dependency compilation
+COPY zentinel-modsec/ ./zentinel-modsec/
+COPY Cargo.toml ./
+COPY src/ src/
+
+# Build the final binary (leveraging the cached dependencies)
+RUN cargo build --release && \
+    cp target/release/zentinel-zentinelsec-agent /zentinel-zentinelsec-agent
+
+FROM debian:bookworm-slim AS prebuilt
+
+# Install debugging tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    procps \
+    net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /zentinel-zentinelsec-agent /zentinel-zentinelsec-agent
 
 LABEL org.opencontainers.image.title="Zentinel ZentinelSec Agent" \
       org.opencontainers.image.description="Zentinel ZentinelSec Agent for Zentinel reverse proxy" \
