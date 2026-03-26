@@ -147,6 +147,9 @@ impl ZentinelSecEngine {
 
         // Always enable the rule engine
         rules_content.push_str("SecRuleEngine On\n");
+        // Set default paranoia levels to 1 if not set by rules
+        rules_content.push_str("SecAction \"id:900000,phase:1,pass,nolog,setvar:tx.detection_paranoia_level=1,setvar:tx.blocking_paranoia_level=1\"\n");
+        rules_content.push_str("SecAction \"id:900001,phase:2,pass,nolog,setvar:tx.detection_paranoia_level=1,setvar:tx.blocking_paranoia_level=1\"\n");
 
         // Load rules from configured paths
         let mut loaded_count = 0;
@@ -184,10 +187,6 @@ impl ZentinelSecEngine {
             ModSecurity::from_string(&rules_content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse rules: {}", e))?
         };
-
-        println!("DEBUG: Rules content length: {}", rules_content.len());
-        println!("DEBUG: Rules files loaded: {}", loaded_count);
-        println!("DEBUG: Total rules compiled: {}", modsec.rule_count());
 
         info!(
             rules_files = loaded_count,
@@ -287,7 +286,7 @@ impl ZentinelSecAgent {
         headers: &HashMap<String, Vec<String>>,
         body: Option<&[u8]>,
     ) -> Result<Option<(u16, String, Vec<String>)>> {
-        tracing::info!(correlation_id = correlation_id, method = method, uri = uri, "ZentinelSec process_request started");
+        info!(correlation_id = correlation_id, method = method, uri = uri, "Processing request through ZentinelSec");
         let engine = self.engine.read().await;
 
         // Create a new transaction
@@ -327,26 +326,24 @@ impl ZentinelSecAgent {
             }
         }
 
-        // Process body if provided (phase 2)
+        // Process body (phase 2)
+        // Run even if body is empty, as rules might check ARGS (GET params)
         if let Some(body_data) = body {
-            if !body_data.is_empty() {
-                tx.append_request_body(body_data)
-                    .map_err(|e| anyhow::anyhow!("append_request_body failed: {}", e))?;
-            }
+            tx.append_request_body(body_data)
+                .map_err(|e| anyhow::anyhow!("append_request_body failed: {}", e))?;
         }
 
-        // Always process request body phase to ensure ARGS_GET are matched against Phase 2 rules
         tx.process_request_body()
             .map_err(|e| anyhow::anyhow!("process_request_body failed: {}", e))?;
 
-        // Check for intervention after body
+        // Check for intervention after body/phase 2
         if let Some(intervention) = tx.intervention() {
             let status = intervention.status;
             if status != 0 && status != 200 {
                 debug!(
                     correlation_id = correlation_id,
                     status = status,
-                    "ZentinelSec intervention (body)"
+                    "ZentinelSec intervention (phase 2)"
                 );
                 let rule_ids = tx.matched_rules().iter().map(|s| s.to_string()).collect();
                 return Ok(Some((
@@ -507,9 +504,9 @@ impl AgentHandlerV2 for ZentinelSecAgent {
     }
 
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
+        info!(correlation_id = %event.metadata.correlation_id, uri = %event.uri, method = %event.method, "Received request headers event");
         self.requests_total.fetch_add(1, Ordering::Relaxed);
         let path = &event.uri;
-        println!("DEBUG: on_request_headers URI: {}", path);
         let correlation_id = &event.metadata.correlation_id;
 
         // Check exclusions

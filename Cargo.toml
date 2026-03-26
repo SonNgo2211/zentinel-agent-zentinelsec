@@ -27,7 +27,7 @@ zentinel-agent-protocol = "0.5"
 zentinel-common = "0.5"
 
 # Pure Rust ModSecurity implementation
-zentinel-modsec = { path = "./zentinel-modsec" }
+zentinel-modsec = { path = "../zentinel-modsec" }
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }

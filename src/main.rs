@@ -77,47 +77,36 @@ async fn main() -> Result<()> {
 
     // Initialize tracing
     let log_level = if args.verbose { "debug" } else { "info" };
-    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
-        format!(
+    tracing_subscriber::fmt()
+        .with_env_filter(format!(
             "{}={},zentinel_agent_zentinelsec={},zentinel_agent_protocol=info",
             env!("CARGO_CRATE_NAME"),
             log_level,
             log_level
-        )
-    });
-
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+        ))
         .json()
         .init();
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
         protocol = "v2",
-        "Starting ZentinelSec Agent - BUILD 2026-03-25-FIX-01"
+        "Starting Zentinel ZentinelSec Agent (pure Rust ModSecurity)"
     );
 
     // Build configuration
     let config = args.to_config();
 
-    info!(
-        rules_count = config.rules_paths.len(),
-        block_mode = config.block_mode,
-        body_inspection = config.body_inspection_enabled,
-        response_inspection = config.response_inspection_enabled,
-        max_body_size = config.max_body_size,
-        "Configuration loaded"
-    );
-
-    if config.rules_paths.is_empty() {
-        tracing::warn!("No rules paths configured - ZentinelSec will not block any requests");
-        tracing::warn!(
-            "Use --rules to specify rule files, e.g.: --rules /etc/modsecurity/crs/rules/*.conf"
-        );
-    }
-
     // Create agent
     let agent = ZentinelSecAgent::new(config)?;
+
+    info!(
+        rules_paths = args.rules_paths.len(),
+        block_mode = args.block_mode,
+        body_inspection = args.body_inspection,
+        response_inspection = args.response_inspection,
+        max_body_size = args.max_body_size,
+        "Configuration loaded"
+    );
 
     // Start agent server using gRPC transport (v2 protocol)
     let addr: std::net::SocketAddr = args

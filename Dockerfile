@@ -17,7 +17,7 @@ ARG DEBIAN_VARIANT=slim-bookworm
 ################################################################################
 FROM rust:${RUST_VERSION}-${DEBIAN_VARIANT} AS builder
 
-# Install build dependencies
+# Install build dependencies (only what's needed for compilation)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         pkg-config \
@@ -29,26 +29,18 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# 1. Copy only manifests and internal crates to cache dependency compilation
-COPY zentinel-modsec/ ./zentinel-modsec/
-COPY Cargo.toml ./
-COPY src/ src/
+# Copy manifest files first for better layer caching
+COPY zentinelsec-agent/Cargo.toml zentinelsec-agent/
+COPY zentinel-modsec/zentinel-modsec-main /app/zentinel-modsec/zentinel-modsec-main
+COPY zentinelsec-agent/src zentinelsec-agent/src
 
-# Build the final binary (leveraging the cached dependencies)
-RUN cargo build --release && \
-    cp target/release/zentinel-zentinelsec-agent /zentinel-zentinelsec-agent
+WORKDIR /app/zentinelsec-agent
+# Build dependencies and agent
+RUN cargo build --release
 
-FROM debian:bookworm-slim AS prebuilt
+FROM gcr.io/distroless/cc-debian12:nonroot
 
-# Install debugging tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    procps \
-    net-tools \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /zentinel-zentinelsec-agent /zentinel-zentinelsec-agent
+COPY --from=builder /app/zentinelsec-agent/target/release/zentinel-zentinelsec-agent /zentinel-zentinelsec-agent
 
 LABEL org.opencontainers.image.title="Zentinel ZentinelSec Agent" \
       org.opencontainers.image.description="Zentinel ZentinelSec Agent for Zentinel reverse proxy" \
