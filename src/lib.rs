@@ -286,17 +286,22 @@ impl ZentinelSecAgent {
         headers: &HashMap<String, Vec<String>>,
         body: Option<&[u8]>,
     ) -> Result<Option<(u16, String, Vec<String>)>> {
-        info!(correlation_id = correlation_id, method = method, uri = uri, "Processing request through ZentinelSec");
+        info!(correlation_id = correlation_id, method = method, uri = uri, "Processing request through ZentinelSec - start");
         let engine = self.engine.read().await;
 
         // Create a new transaction
+        info!(correlation_id = correlation_id, "Creating transaction");
         let mut tx = engine.modsec.new_transaction();
+        info!(correlation_id = correlation_id, "Transaction created");
 
         // Process URI
+        info!(correlation_id = correlation_id, "Processing URI");
         tx.process_uri(uri, method, "HTTP/1.1")
             .map_err(|e| anyhow::anyhow!("process_uri failed: {}", e))?;
+        info!(correlation_id = correlation_id, "URI processed");
 
         // Add headers
+        info!(correlation_id = correlation_id, "Processing headers");
         for (name, values) in headers {
             for value in values {
                 tx.add_request_header(name, value)
@@ -317,7 +322,22 @@ impl ZentinelSecAgent {
                     status = status,
                     "ZentinelSec intervention (headers)"
                 );
-                let rule_ids = tx.matched_rules().iter().map(|s| s.to_string()).collect();
+                
+                // Prioritize rule IDs from intervention as they are the ones that caused the block
+                let rule_ids = if !intervention.rule_ids.is_empty() {
+                    intervention.rule_ids.clone()
+                } else {
+                    // Fallback: filter out CRS initialization/config rules (IDs < 910000)
+                    // to only return actual security detection rules (941xxx, 942xxx, etc.)
+                    tx.matched_rules()
+                        .iter()
+                        .filter(|id| {
+                            id.parse::<u32>().map(|n| n >= 910000).unwrap_or(true)
+                        })
+                        .cloned()
+                        .collect()
+                };
+
                 return Ok(Some((
                     status,
                     "Blocked by ZentinelSec".to_string(),
@@ -335,6 +355,7 @@ impl ZentinelSecAgent {
 
         tx.process_request_body()
             .map_err(|e| anyhow::anyhow!("process_request_body failed: {}", e))?;
+        info!(correlation_id = correlation_id, "Headers processed");
 
         // Check for intervention after body/phase 2
         if let Some(intervention) = tx.intervention() {
@@ -345,7 +366,22 @@ impl ZentinelSecAgent {
                     status = status,
                     "ZentinelSec intervention (phase 2)"
                 );
-                let rule_ids = tx.matched_rules().iter().map(|s| s.to_string()).collect();
+                
+                // Prioritize rule IDs from intervention
+                let rule_ids = if !intervention.rule_ids.is_empty() {
+                    intervention.rule_ids.clone()
+                } else {
+                    // Fallback: filter out CRS initialization/config rules (IDs < 910000)
+                    // to only return actual security detection rules (941xxx, 942xxx, etc.)
+                    tx.matched_rules()
+                        .iter()
+                        .filter(|id| {
+                            id.parse::<u32>().map(|n| n >= 910000).unwrap_or(true)
+                        })
+                        .cloned()
+                        .collect()
+                };
+
                 return Ok(Some((
                     status,
                     "Blocked by ZentinelSec".to_string(),
@@ -512,11 +548,14 @@ impl AgentHandlerV2 for ZentinelSecAgent {
         // Check exclusions
         {
             let engine = self.engine.read().await;
+            info!(correlation_id = correlation_id, path = path, "Checking if path is excluded");
             if engine.is_excluded(path) {
-                debug!(path = path, "Path excluded from ZentinelSec");
+                info!(correlation_id = correlation_id, path = path, "Path excluded from ZentinelSec");
                 return AgentResponse::default_allow();
             }
         }
+
+        info!(correlation_id = correlation_id, "Path not excluded, proceeding to process_request");
 
         // Always process headers immediately (phase 1)
         // This detects attacks in URI, query string, and headers
@@ -584,6 +623,8 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                 self.requests_allowed.fetch_add(1, Ordering::Relaxed);
                 // Headers passed - if body inspection enabled, store for body processing
                 let engine = self.engine.read().await;
+
+                info!(correlation_id = correlation_id, body_inspection_enabled = engine.config.body_inspection_enabled, "Checking if body inspection is enabled for pending request");
                 if engine.config.body_inspection_enabled {
                     let mut pending = self.pending_requests.write().await;
                     pending.insert(
@@ -597,7 +638,13 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                         },
                     );
                 }
-                AgentResponse::default_allow()
+                
+                let mut response = AgentResponse::default_allow();
+                info!(correlation_id = correlation_id, body_inspection_enabled = engine.config.body_inspection_enabled, "Checking if body inspection is enabled for needs_more signal");
+                if engine.config.body_inspection_enabled {
+                    response = response.set_needs_more(true);
+                }
+                response
             }
             Err(e) => {
                 self.requests_allowed.fetch_add(1, Ordering::Relaxed);
@@ -622,10 +669,13 @@ impl AgentHandlerV2 for ZentinelSecAgent {
 
         if !pending_exists {
             // No pending request - body inspection might be disabled
+            debug!(correlation_id = correlation_id, "No pending request for body chunk");
             return AgentResponse::default_allow();
         }
 
-        // Decode base64 chunk
+        info!(correlation_id = correlation_id, data_size = event.data.len(), is_last = event.is_last, "Received request body chunk");
+
+        // Restore base64 decoding as event.data is likely a String
         let chunk = match base64::engine::general_purpose::STANDARD.decode(&event.data) {
             Ok(data) => data,
             Err(e) => {
@@ -742,7 +792,7 @@ impl AgentHandlerV2 for ZentinelSecAgent {
             }
         }
 
-        AgentResponse::default_allow()
+        AgentResponse::default_allow().set_needs_more(!event.is_last)
     }
 
     async fn on_response_body_chunk(&self, event: ResponseBodyChunkEvent) -> AgentResponse {

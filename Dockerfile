@@ -30,9 +30,9 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Copy manifest files first for better layer caching
-COPY zentinelsec-agent/Cargo.toml zentinelsec-agent/
-COPY zentinel-modsec/zentinel-modsec-main /app/zentinel-modsec/zentinel-modsec-main
-COPY zentinelsec-agent/src zentinelsec-agent/src
+COPY Cargo.toml zentinelsec-agent/
+COPY ./zentinel-modsec ./zentinel-modsec
+COPY ./src zentinelsec-agent/src
 
 WORKDIR /app/zentinelsec-agent
 # Build dependencies and agent
