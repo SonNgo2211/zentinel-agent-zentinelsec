@@ -46,6 +46,22 @@ struct Args {
     #[arg(long, default_value = "false", env = "ZENTINELSEC_RESPONSE_INSPECTION")]
     response_inspection: bool,
 
+    /// Audit log path
+    #[arg(long, default_value = "/var/log/zentinelsec_audit.json", env = "ZENTINELSEC_AUDIT_LOG_PATH")]
+    audit_log_path: String,
+
+    /// Enable writing logs to a local file
+    #[arg(long, default_value = "true", env = "ZENTINELSEC_ENABLE_FILE_LOG")]
+    enable_file_log: bool,
+
+    /// Enable writing logs to standard output
+    #[arg(long, default_value = "true", env = "ZENTINELSEC_ENABLE_CONSOLE_LOG")]
+    enable_console_log: bool,
+
+    /// Syslog URL
+    #[arg(long, env = "ZENTINELSEC_SYSLOG_URL")]
+    syslog_url: Option<String>,
+
     /// Enable verbose logging
     #[arg(short, long, env = "ZENTINELSEC_VERBOSE")]
     verbose: bool,
@@ -66,6 +82,9 @@ impl Args {
             body_inspection_enabled: self.body_inspection,
             max_body_size: self.max_body_size,
             response_inspection_enabled: self.response_inspection,
+            audit_log_path: if self.enable_file_log { Some(self.audit_log_path.clone()) } else { None },
+            syslog_url: self.syslog_url.clone(),
+            enable_console_log: self.enable_console_log,
         }
     }
 }

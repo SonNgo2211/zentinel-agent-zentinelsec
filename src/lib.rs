@@ -54,6 +54,12 @@ pub struct ZentinelSecConfig {
     pub max_body_size: usize,
     /// Enable response body inspection
     pub response_inspection_enabled: bool,
+    /// Audit log path
+    pub audit_log_path: Option<String>,
+    /// Syslog URL (optional)
+    pub syslog_url: Option<String>,
+    /// Enable writing logs to standard console output
+    pub enable_console_log: bool,
 }
 
 impl Default for ZentinelSecConfig {
@@ -65,6 +71,9 @@ impl Default for ZentinelSecConfig {
             body_inspection_enabled: true,
             max_body_size: 1048576, // 1MB
             response_inspection_enabled: false,
+            audit_log_path: Some("/var/log/zentinelsec_audit.json".to_string()),
+            syslog_url: None,
+            enable_console_log: true,
         }
     }
 }
@@ -94,6 +103,15 @@ pub struct ZentinelSecConfigJson {
     /// Enable response body inspection
     #[serde(default)]
     pub response_inspection_enabled: bool,
+    /// Audit log path
+    #[serde(default)]
+    pub audit_log_path: Option<String>,
+    /// Syslog URL
+    #[serde(default)]
+    pub syslog_url: Option<String>,
+    /// Enable console log
+    #[serde(default = "default_enable_console_log")]
+    pub enable_console_log: bool,
 }
 
 fn default_block_mode() -> bool {
@@ -108,6 +126,10 @@ fn default_max_body_size() -> usize {
     1048576 // 1MB
 }
 
+fn default_enable_console_log() -> bool {
+    true
+}
+
 impl From<ZentinelSecConfigJson> for ZentinelSecConfig {
     fn from(json: ZentinelSecConfigJson) -> Self {
         Self {
@@ -117,6 +139,9 @@ impl From<ZentinelSecConfigJson> for ZentinelSecConfig {
             body_inspection_enabled: json.body_inspection_enabled,
             max_body_size: json.max_body_size,
             response_inspection_enabled: json.response_inspection_enabled,
+            audit_log_path: json.audit_log_path,
+            syslog_url: json.syslog_url,
+            enable_console_log: json.enable_console_log,
         }
     }
 }
@@ -226,6 +251,7 @@ struct PendingTransaction {
 pub struct ZentinelSecAgent {
     engine: Arc<RwLock<ZentinelSecEngine>>,
     pending_requests: Arc<RwLock<HashMap<String, PendingTransaction>>>,
+    logger: Arc<zentinel_modsec::logging::WafAsyncLogger>,
     /// Metrics tracking
     requests_total: AtomicU64,
     requests_blocked: AtomicU64,
@@ -237,10 +263,17 @@ pub struct ZentinelSecAgent {
 impl ZentinelSecAgent {
     /// Create a new ZentinelSec agent with the given configuration
     pub fn new(config: ZentinelSecConfig) -> Result<Self> {
+        let logger = zentinel_modsec::logging::WafAsyncLogger::new(
+            config.audit_log_path.as_deref(),
+            config.syslog_url.as_deref(),
+            config.enable_console_log,
+            10000,
+        );
         let engine = ZentinelSecEngine::new(config)?;
         Ok(Self {
             engine: Arc::new(RwLock::new(engine)),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            logger,
             requests_total: AtomicU64::new(0),
             requests_blocked: AtomicU64::new(0),
             requests_allowed: AtomicU64::new(0),
@@ -249,6 +282,33 @@ impl ZentinelSecAgent {
     }
 
     /// Check if the agent is currently draining
+
+    fn emit_log(&self, correlation_id: String, client_ip: String, method: String, uri: String, blocked: bool, rule_ids: Vec<String>, message: String) {
+        use zentinel_modsec::logging::{WafLog, ClientInfo, HttpContext, WafDetails, PerformanceInfo};
+        let mut log = WafLog::new(
+            correlation_id,
+            ClientInfo {
+                remote_ip: client_ip,
+                user_agent: "-".to_string(),
+                ja3_fingerprint: None,
+            },
+            HttpContext {
+                method,
+                full_url: uri,
+                host: "-".to_string(), // Optional to extract properly
+                http_version: "HTTP/1.1".to_string(),
+            },
+            WafDetails {
+                is_blocked: blocked,
+                matched_rules: rule_ids,
+                attack_type: None,
+                signature_match: Some(message),
+            },
+            PerformanceInfo { latency_ms: 0 },
+        );
+        self.logger.log_request(log);
+    }
+
     fn is_draining(&self) -> bool {
         let drain_end = self.draining.load(Ordering::Relaxed);
         if drain_end == 0 {
@@ -573,6 +633,7 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                 let engine = self.engine.read().await;
                 if engine.config.block_mode {
                     self.requests_blocked.fetch_add(1, Ordering::Relaxed);
+                    self.emit_log(correlation_id.clone(), event.metadata.client_ip.clone(), event.method.clone(), event.uri.clone(), true, rule_ids.clone(), message.clone());
                     info!(
                         correlation_id = correlation_id,
                         status = status,
@@ -601,6 +662,7 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                         })
                 } else {
                     self.requests_allowed.fetch_add(1, Ordering::Relaxed);
+                    self.emit_log(correlation_id.clone(), event.metadata.client_ip.clone(), event.method.clone(), event.uri.clone(), false, rule_ids.clone(), message.clone());
                     info!(
                         correlation_id = correlation_id,
                         rules = ?rule_ids,
@@ -623,6 +685,10 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                 self.requests_allowed.fetch_add(1, Ordering::Relaxed);
                 // Headers passed - if body inspection enabled, store for body processing
                 let engine = self.engine.read().await;
+
+                if !engine.config.body_inspection_enabled {
+                    self.emit_log(correlation_id.clone(), event.metadata.client_ip.clone(), event.method.clone(), event.uri.clone(), false, vec![], "Clean".to_string());
+                }
 
                 info!(correlation_id = correlation_id, body_inspection_enabled = engine.config.body_inspection_enabled, "Checking if body inspection is enabled for pending request");
                 if engine.config.body_inspection_enabled {
@@ -731,6 +797,7 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                             self.requests_blocked.fetch_add(1, Ordering::Relaxed);
                             // Decrement allowed since we counted it in headers phase
                             self.requests_allowed.fetch_sub(1, Ordering::Relaxed);
+                            self.emit_log(correlation_id.clone(), tx.client_ip.clone(), tx.method.clone(), tx.uri.clone(), true, rule_ids.clone(), message.clone());
                             info!(
                                 correlation_id = correlation_id,
                                 status = status,
@@ -762,6 +829,7 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                                     ..Default::default()
                                 });
                         } else {
+                            self.emit_log(correlation_id.clone(), tx.client_ip.clone(), tx.method.clone(), tx.uri.clone(), false, rule_ids.clone(), message.clone());
                             info!(
                                 correlation_id = correlation_id,
                                 rules = ?rule_ids,
@@ -784,7 +852,9 @@ impl AgentHandlerV2 for ZentinelSecAgent {
                                 });
                         }
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        self.emit_log(correlation_id.clone(), tx.client_ip.clone(), tx.method.clone(), tx.uri.clone(), false, vec![], "Clean".to_string());
+                    }
                     Err(e) => {
                         warn!(error = %e, "ZentinelSec body processing error");
                     }
